@@ -34,6 +34,7 @@ let esp32InputStateChanges = 0;
 let esp32BleConnIntervalUnits = null;
 let esp32BleConnects = 0;
 let esp32BleDisconnects = 0;
+let esp32BleConnected = false;
 let esp32BleLastDisconnectReason = null;
 let esp32HidSubscribes = 0;
 let esp32HidUnsubscribes = 0;
@@ -62,6 +63,10 @@ let esp32RumbleFramesReceived = 0;
 let rumbleSequence = 1;
 let currentRumble = { type: "rumble", seq: 0, strong: 0, weak: 0, duration: 0 };
 let localControllerSocket = null;
+let automationSocket = null;
+let automationEnabled = false;
+let automationLastInputAt = 0;
+let manualNeedsNeutral = false;
 let esp32Serial = null;
 let esp32SerialError = null;
 let pendingEsp32Frame = null;
@@ -71,6 +76,39 @@ let esp32SerialWriteInFlight = false;
 let lastEsp32Keepalive = 0;
 
 const ESP32_EDGE_QUEUE_LIMIT = 64;
+const AUTOMATION_INPUT_TIMEOUT_MS = 1200;
+
+function isLocalClient(request) {
+  return ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(request.socket.remoteAddress);
+}
+
+function sendAutomationStatus(error = null) {
+  if (automationSocket?.readyState !== 1) return;
+  automationSocket.send(JSON.stringify({
+    type: "automation-status",
+    connected: true,
+    serialConnected: esp32Serial?.isOpen === true,
+    bleConnected: esp32BleConnected,
+    enabled: automationEnabled,
+    error,
+  }));
+}
+
+function forceNeutral() {
+  currentState = { ...NEUTRAL_STATE };
+  pendingEsp32Frame = null;
+  esp32EdgeFrames.length = 0;
+  queueEsp32State(currentState, false);
+}
+
+function disableAutomation(error = null) {
+  if (!automationEnabled) return;
+  automationEnabled = false;
+  automationLastInputAt = 0;
+  manualNeedsNeutral = true;
+  forceNeutral();
+  sendAutomationStatus(error);
+}
 
 function publishRumble(raw) {
   const message = makeRumbleMessage(raw, rumbleSequence++);
@@ -105,6 +143,7 @@ function pumpEsp32Serial() {
     if (writeError) {
       esp32SerialError = writeError.message;
       esp32SerialFramesDropped += 1;
+      disableAutomation(`ESP32 serial write failed: ${writeError.message}`);
     } else {
       esp32SerialFramesWritten += 1;
       if (isDigitalEdge) esp32DigitalEdgeFramesWritten += 1;
@@ -165,8 +204,14 @@ function openEsp32Serial() {
     esp32SerialError = null;
     console.log(`ESP32 BLE controller: ${config.esp32SerialPort}`);
     queueEsp32State(currentState);
+    sendAutomationStatus();
   });
-  serial.on("error", (error) => { esp32SerialError = error.message; });
+  serial.on("error", (error) => {
+    esp32SerialError = error.message;
+    esp32BleConnected = false;
+    disableAutomation("ESP32 serial connection failed");
+    sendAutomationStatus(esp32SerialError);
+  });
   serial.on("data", (data) => {
     const lines = (esp32LogTail + data.toString("utf8")).split(/\r?\n/);
     esp32LogTail = (lines.pop() || "").slice(-2048);
@@ -186,11 +231,17 @@ function openEsp32Serial() {
         lastBrowserStateChange = 0;
       }
       if (line.trim() === "DI") esp32InputStateChanges += 1;
-      if (line.includes("connected, set nintendo switch addr")) esp32BleConnects += 1;
+      if (line.includes("connected, set nintendo switch addr")) {
+        esp32BleConnects += 1;
+        esp32BleConnected = true;
+        sendAutomationStatus();
+      }
       const disconnect = line.match(/disconnected, reason=(\d+)/);
       if (disconnect) {
         esp32BleDisconnects += 1;
         esp32BleLastDisconnectReason = Number(disconnect[1]);
+        esp32BleConnected = false;
+        sendAutomationStatus();
       }
       const subscribe = line.match(/subscribe event;.*attr_handle=0x00(?:0e|0E).*prevn=(\d+) curn=(\d+)/);
       if (subscribe) {
@@ -239,10 +290,13 @@ function openEsp32Serial() {
   });
   serial.on("close", () => {
     if (esp32Serial === serial) esp32Serial = null;
+    esp32BleConnected = false;
+    disableAutomation("ESP32 serial connection closed");
     stopRumble();
     pendingEsp32Frame = null;
     esp32EdgeFrames.length = 0;
     esp32SerialWriteInFlight = false;
+    sendAutomationStatus("ESP32 serial connection closed");
     setTimeout(openEsp32Serial, 2000).unref();
   });
 }
@@ -257,7 +311,7 @@ function sendState(state = currentState, sendSerial = true) {
 
 // Keep the ESP32 watchdog fresh while a local controller page is connected.
 setInterval(() => {
-  if (localControllerSocket?.readyState === 1 && Date.now() - lastEsp32Keepalive >= 500) {
+  if ((automationEnabled || localControllerSocket?.readyState === 1) && Date.now() - lastEsp32Keepalive >= 500) {
     lastEsp32Keepalive = Date.now();
     queueEsp32State(currentState, false);
   }
@@ -278,6 +332,8 @@ const server = http.createServer((request, response) => {
       browserDigitalEdgesAccepted,
       lastBrowserInputAgeMs: lastBrowserInput ? Date.now() - lastBrowserInput : null,
       localControllerConnected: localControllerSocket?.readyState === 1,
+      automationConnected: automationSocket?.readyState === 1,
+      automationEnabled,
       esp32SerialPort: config.esp32SerialPort || null,
       esp32SerialConnected: esp32Serial?.isOpen === true,
       esp32SerialError,
@@ -296,6 +352,7 @@ const server = http.createServer((request, response) => {
       esp32BleConnIntervalMs: esp32BleConnIntervalUnits == null ? null : esp32BleConnIntervalUnits * 1.25,
       esp32BleConnects,
       esp32BleDisconnects,
+      esp32BleConnected,
       esp32BleLastDisconnectReason,
       esp32HidSubscribes,
       esp32HidUnsubscribes,
@@ -341,10 +398,10 @@ const server = http.createServer((request, response) => {
   });
 });
 
-const websocket = new WebSocketServer({ server, path: "/control", maxPayload: 2048 });
+const websocket = new WebSocketServer({ noServer: true, maxPayload: 2048 });
 websocket.on("connection", (socket, request) => {
   // The local bridge is intentionally loopback-only. Remote users terminate at the host browser via WebRTC.
-  if (request.socket.remoteAddress !== "127.0.0.1" && request.socket.remoteAddress !== "::1" && request.socket.remoteAddress !== "::ffff:127.0.0.1") {
+  if (!isLocalClient(request)) {
     socket.close(1008, "local clients only");
     return;
   }
@@ -369,7 +426,22 @@ websocket.on("connection", (socket, request) => {
     try {
       const message = JSON.parse(raw.toString());
       if (message.type !== "input") return;
+      if (automationEnabled) {
+        const digital = acceptDigitalEdges(message);
+        if (digital.sid && digital.edgeAck !== null && socket.readyState === 1) {
+          socket.send(JSON.stringify({ type: "edge-ack", sid: digital.sid, edgeAck: digital.edgeAck }));
+        }
+        return;
+      }
       const nextState = sanitizeState(message.state);
+      if (manualNeedsNeutral) {
+        const digital = acceptDigitalEdges(message);
+        if (digital.sid && digital.edgeAck !== null && socket.readyState === 1) {
+          socket.send(JSON.stringify({ type: "edge-ack", sid: digital.sid, edgeAck: digital.edgeAck }));
+        }
+        if (!sameState(nextState, NEUTRAL_STATE)) return;
+        manualNeedsNeutral = false;
+      }
       const stateChanged = JSON.stringify(nextState) !== JSON.stringify(currentState);
       if (stateChanged) {
         lastBrowserStateChange = Date.now();
@@ -398,11 +470,82 @@ websocket.on("connection", (socket, request) => {
   socket.on("close", () => {
     if (socket !== localControllerSocket) return;
     localControllerSocket = null;
-    currentState = { ...NEUTRAL_STATE };
     lastBrowserInput = 0;
-    sendState();
+    if (!automationEnabled) forceNeutral();
   });
 });
+
+// A second local connection supplies automation while the browser keeps its
+// manual controller connection. Only one source is forwarded to COM at a time.
+const automationWebsocket = new WebSocketServer({ noServer: true, maxPayload: 2048 });
+server.on("upgrade", (request, socket, head) => {
+  let pathname;
+  try { pathname = new URL(request.url, "http://localhost").pathname; } catch {
+    socket.destroy();
+    return;
+  }
+  const target = pathname === "/control" ? websocket : pathname === "/automation" ? automationWebsocket : null;
+  if (!target) {
+    socket.destroy();
+    return;
+  }
+  target.handleUpgrade(request, socket, head, (client) => target.emit("connection", client, request));
+});
+automationWebsocket.on("connection", (socket, request) => {
+  if (!isLocalClient(request)) {
+    socket.close(1008, "local clients only");
+    return;
+  }
+  if (automationSocket?.readyState === 1) {
+    socket.close(4001, "automation client is already connected");
+    return;
+  }
+  automationSocket = socket;
+  sendAutomationStatus();
+  socket.on("message", (raw) => {
+    if (socket !== automationSocket) return;
+    let message;
+    try { message = JSON.parse(raw.toString()); } catch {
+      socket.close(1003, "invalid message");
+      return;
+    }
+    if (message.type === "automation" && typeof message.enabled === "boolean") {
+      if (message.enabled && !esp32Serial?.isOpen) {
+        sendAutomationStatus("ESP32 serial connection is unavailable");
+        return;
+      }
+      // Every transition clears queued input from the previous source first.
+      forceNeutral();
+      if (automationEnabled && !message.enabled) manualNeedsNeutral = true;
+      automationEnabled = message.enabled;
+      automationLastInputAt = message.enabled ? Date.now() : 0;
+      sendAutomationStatus();
+      return;
+    }
+    if (message.type !== "input" || !automationEnabled) return;
+    const nextState = sanitizeState(message.state);
+    const digital = acceptDigitalEdges(message);
+    if (digital.states.length) queueEsp32Edges(digital.states);
+    currentState = nextState;
+    automationLastInputAt = Date.now();
+    const lastEdge = digital.states.at(-1);
+    sendState(currentState, !lastEdge || !sameState(lastEdge, currentState));
+    if (digital.sid && digital.edgeAck !== null) {
+      socket.send(JSON.stringify({ type: "edge-ack", sid: digital.sid, edgeAck: digital.edgeAck }));
+    }
+  });
+  socket.on("close", () => {
+    if (socket !== automationSocket) return;
+    disableAutomation();
+    automationSocket = null;
+  });
+});
+
+setInterval(() => {
+  if (automationEnabled && Date.now() - automationLastInputAt > AUTOMATION_INPUT_TIMEOUT_MS) {
+    disableAutomation("Python input timeout");
+  }
+}, 100).unref();
 
 setInterval(() => {
   const socket = localControllerSocket;
@@ -421,8 +564,8 @@ server.listen(config.httpPort, "127.0.0.1", () => {
 });
 
 function shutdown() {
-  currentState = { ...NEUTRAL_STATE };
-  sendState();
+  automationEnabled = false;
+  forceNeutral();
   setTimeout(() => process.exit(0), 30);
 }
 process.on("SIGINT", shutdown);
