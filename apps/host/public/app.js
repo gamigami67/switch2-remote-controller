@@ -27,6 +27,13 @@ const remoteTransportMode = normalizeTransportMode(params.get("transport"));
 let hostTransportMode = TRANSPORT_P2P;
 const status = document.querySelector("#status");
 const gamepadLabel = document.querySelector("#gamepad");
+const sourceSelect = document.querySelector("#input-source");
+const sourceStatus = document.querySelector("#source-status");
+const proDiagnostics = document.querySelector("#pro-diagnostics");
+const proRaw = document.querySelector("#pro-raw");
+let inputSource = "browser";
+let lastProInputAt = 0;
+const PRO_TIMEOUT_MS = 1200;
 const controller = document.querySelector(".controller");
 const heldHats = new Set(), downKeys = new Set();
 const heldKeyboardSticks = { left: new Set(), right: new Set() };
@@ -34,7 +41,8 @@ const claimControl = document.querySelector("#claim-control");
 const topControlState = document.querySelector("#top-control-state");
 const rumbleToggle = document.querySelector("#rumble-toggle");
 const rumbleStatus = document.querySelector("#rumble-status");
-const activeGamepad = () => [...navigator.getGamepads()].find(Boolean);
+const activeGamepad = () => typeof navigator.getGamepads === "function"
+  ? [...navigator.getGamepads()].find((pad) => pad?.connected !== false) : null;
 const haptics = createHapticsController({
   getGamepad: activeGamepad,
   storage: localStorage,
@@ -59,11 +67,21 @@ function connect(takeover = false) {
     localSocketReplaced = false;
     status.textContent = "PC→デバイス接続済み（Switch接続は未確認）";
     status.className = "status waiting";
+    socket.send(JSON.stringify({ type: "source", source: inputSource }));
   });
   socket.addEventListener("message", ({ data }) => {
     try {
       const message = JSON.parse(data);
       if (message.type === "edge-ack" && message.sid === digitalEdges?.sessionId) digitalEdges.acknowledge(message.edgeAck);
+      if (message.type === "source-status") {
+        if (message.source !== inputSource) {
+          resetInput(); resetDigitalSession(); inputSource = message.source;
+          sourceSelect.value = inputSource; previousGamepad = "";
+        }
+        sourceStatus.textContent = message.ready
+          ? `入力元: ${{ browser: "ブラウザー操作", pro: "Proコントローラー", automation: "自動操作" }[message.source] || message.source}`
+          : "ESP32接続待ち / ニュートラル送信中";
+      }
       if (message.type === "rumble") routeRumble(message);
     } catch { }
   });
@@ -231,7 +249,7 @@ function send() {
       pendingRelayState = envelope;
       flushRelay();
     }
-  } else if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "input", ...envelope }));
+  } else if (socket?.readyState === WebSocket.OPEN && inputSource !== "automation") socket.send(JSON.stringify({ type: "input", source: inputSource, ...envelope }));
 }
 function forwardInput(message) {
   const envelope = {
@@ -267,6 +285,19 @@ function resetInput() {
   heldKeyboardSticks.left.clear(); heldKeyboardSticks.right.clear();
   digitalEdges.observe(state);
 }
+function selectInputSource(source) {
+  if (source === inputSource) return;
+  resetInput();
+  resetDigitalSession();
+  document.querySelectorAll(".controller-v2 .active").forEach((element) => element.classList.remove("active"));
+  document.querySelectorAll(".controller-v2 .stick-knob").forEach((element) => { element.style.transform = ""; });
+  inputSource = source;
+  previousGamepad = "";
+  lastProInputAt = 0;
+  sourceStatus.textContent = "ニュートラル送信中";
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "source", source }));
+}
+sourceSelect.addEventListener("change", () => selectInputSource(sourceSelect.value));
 function resetDigitalSession() { digitalEdges.reset(randomHex(8), state); }
 function scheduleDigitalRetries() {
   if (!remoteCode || !canControl) return;
@@ -547,6 +578,7 @@ guestNameInput.addEventListener("keydown", (event) => {
 if (remoteCode && guestNameInput.value.trim()) queueMicrotask(connectGuest);
 
 function setButton(bit, pressed) {
+  if (!remoteCode && inputSource !== "browser") return;
   state.buttons = pressed ? state.buttons | (1 << bit) : state.buttons & ~(1 << bit);
   document.querySelector(`[data-button="${bit}"]`)?.classList.toggle("active", pressed); sendDigitalChange();
 }
@@ -556,10 +588,12 @@ function combinedHat() {
   if (up) return 0; if (right) return 2; if (down) return 4; if (left) return 6; return 8;
 }
 function setHat(direction, pressed) {
+  if (!remoteCode && inputSource !== "browser") return;
   pressed ? heldHats.add(direction) : heldHats.delete(direction); state.hat = combinedHat();
   document.querySelector(`[data-hat="${direction}"]`)?.classList.toggle("active", pressed); sendDigitalChange();
 }
 function setKeyboardStick(side, direction, pressed) {
+  if (!remoteCode && inputSource !== "browser") return;
   const held = heldKeyboardSticks[side];
   pressed ? held.add(direction) : held.delete(direction);
   const horizontal = held.has("left") === held.has("right") ? 128 : held.has("left") ? 0 : 255;
@@ -582,6 +616,7 @@ const handleKeyboard = setupKeyboardBindings((action, pressed) => {
     return;
   }
   if (remoteCode && !canControl) return;
+  if (!remoteCode && inputSource !== "browser") return;
   if (action.type === "hat") setHat(action.value, pressed);
   else if (action.type === "stick") setKeyboardStick(action.side, action.direction, pressed);
   else setButton(action.value, pressed);
@@ -606,8 +641,13 @@ function pollGamepad() {
   const activeActions = readGamepad(pad);
   if (pad) {
     gamepadLabel.textContent = `ゲームパッド: ${pad.id}`;
-    if (!remoteCode || canControl) {
-      const next = gamepadState(pad, activeActions);
+    if ((remoteCode && canControl) || (!remoteCode && inputSource === "pro" && pad.buttons.length >= 16 && pad.axes.length >= 4)) {
+      const next = gamepadState(pad, activeActions, { dpadFromLeftStick: remoteCode !== undefined });
+      if (!remoteCode) {
+        lastProInputAt = Date.now();
+        proDiagnostics.textContent = `Gamepad API: ${pad.id} / mapping=${pad.mapping || "不明"} / ${pad.buttons.length}ボタン / ${pad.axes.length}軸`;
+        proRaw.textContent = `押下: ${pad.buttons.map((button, index) => button.pressed ? index : null).filter((index) => index !== null).join(", ") || "なし"}\n軸: ${pad.axes.map((axis) => axis.toFixed(2)).join(", ")}\n変換後: ${JSON.stringify(next)}`;
+      }
       const serialized = JSON.stringify(next); if (serialized !== previousGamepad) {
         state = next; previousGamepad = serialized;
         const digitalChanged = digitalEdges.observe(state);
@@ -615,7 +655,24 @@ function pollGamepad() {
         if (digitalChanged) scheduleDigitalRetries();
       }
     }
-  } else gamepadLabel.textContent = "ゲームパッド未接続";
+    if (!remoteCode && inputSource === "pro" && (pad.buttons.length < 16 || pad.axes.length < 4)) {
+      proDiagnostics.textContent = `Gamepad API: 入力形式が不足（${pad.buttons.length}ボタン / ${pad.axes.length}軸）。中継停止中`;
+      proRaw.textContent = `押下: ${pad.buttons.map((button, index) => button.pressed ? index : null).filter((index) => index !== null).join(", ")}\n軸: ${pad.axes.join(", ")}`;
+      if (lastProInputAt) { resetInput(); lastProInputAt = 0; send(); }
+    }
+  } else {
+    gamepadLabel.textContent = "ゲームパッド未接続";
+    proDiagnostics.textContent = typeof navigator.getGamepads === "function"
+      ? "Gamepad API: ゲームパッド未接続。Bluetooth接続後にボタンを押してください。"
+      : "Gamepad API: このブラウザーでは利用できません。中継停止中";
+    proRaw.textContent = "";
+    if (!remoteCode && inputSource === "pro" && lastProInputAt) {
+      resetInput(); previousGamepad = ""; lastProInputAt = 0; send();
+    }
+  }
+  if (!remoteCode && inputSource === "pro" && lastProInputAt && Date.now() - lastProInputAt > PRO_TIMEOUT_MS) {
+    resetInput(); previousGamepad = ""; lastProInputAt = 0; send();
+  }
   haptics.refresh();
   requestAnimationFrame(pollGamepad);
 }
@@ -626,6 +683,7 @@ addEventListener("visibilitychange", () => {
 });
 addEventListener("pagehide", () => { haptics.stop(); resetInput(); send(); });
 if (remoteCode) {
+  document.querySelector("#input-source-panel").hidden = true;
   canControl = false; controller.classList.add("locked"); document.querySelector("#session-panel").hidden = true;
   document.querySelector("#top-control-bar").hidden = false;
   document.querySelector("#guest-panel").hidden = false; document.querySelector("#remote-code").textContent = remoteCode;
@@ -664,6 +722,7 @@ function setupVirtualStick(element) {
   const xKey = side === "left" ? "lx" : "rx", yKey = side === "left" ? "ly" : "ry";
   let pointerId = null;
   function update(event) {
+    if (!remoteCode && inputSource !== "browser") return;
     const rect = ring.getBoundingClientRect();
     let x = (event.clientX - (rect.left + rect.width / 2)) / (rect.width * .42);
     let y = (event.clientY - (rect.top + rect.height / 2)) / (rect.height * .42);

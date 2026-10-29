@@ -29,6 +29,17 @@
       <span><b>BLE空き</b><strong id="diag-ble-queue">—</strong></span>
     </section>
 
+    <section id="input-source-panel" class="input-source-panel" aria-label="入力元">
+      <label>入力元 <select id="input-source">
+        <option value="browser">ブラウザー操作</option>
+        <option value="pro">Proコントローラー</option>
+        <option value="automation">自動操作（ローカル）</option>
+      </select></label>
+      <p id="source-status" role="status">ブラウザー操作</p>
+      <p id="pro-diagnostics">Gamepad API: 未確認</p>
+      <pre id="pro-raw" aria-label="Proコン入力診断"></pre>
+    </section>
+
     <section class="controller controller-v2" aria-label="controller">
       <div class="shoulder-row control-row">
         <button data-button="4">L</button><button data-button="6">ZL</button>

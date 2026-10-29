@@ -65,7 +65,7 @@ export function resolveGamepadActions(bindings, buttons, suppressedButtons = new
   });
 }
 
-export function gamepadState(pad, activeActions) {
+export function gamepadState(pad, activeActions, { dpadFromLeftStick = true } = {}) {
   let buttons = 0;
   for (const action of activeActions) {
     if (action.type === "button") buttons |= 1 << action.value;
@@ -78,10 +78,12 @@ export function gamepadState(pad, activeActions) {
     const up = hats.has(0), right = hats.has(2), down = hats.has(4), left = hats.has(6);
     if (up && right) hat = 1; else if (right && down) hat = 3; else if (down && left) hat = 5; else if (left && up) hat = 7;
     else if (up) hat = 0; else if (right) hat = 2; else if (down) hat = 4; else if (left) hat = 6;
-  } else if (y < -.5) hat = x > .5 ? 1 : x < -.5 ? 7 : 0;
-  else if (y > .5) hat = x > .5 ? 3 : x < -.5 ? 5 : 4;
-  else if (x > .5) hat = 2;
-  else if (x < -.5) hat = 6;
+  } else if (dpadFromLeftStick) {
+    if (y < -.5) hat = x > .5 ? 1 : x < -.5 ? 7 : 0;
+    else if (y > .5) hat = x > .5 ? 3 : x < -.5 ? 5 : 4;
+    else if (x > .5) hat = 2;
+    else if (x < -.5) hat = 6;
+  }
 
   const stickValue = (side, axis, fallback) => {
     const negative = activeActions.some((action) => action.type === "stick" && action.side === side && action.direction === (axis === "x" ? "left" : "up"));

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test controller-state.test.mjs config.test.mjs easycon.test.mjs input-reliability.test.mjs keymap.test.mjs gamepad-map.test.mjs transport.test.mjs rumble.test.mjs haptics.test.mjs",
+    "test": "node --test controller-state.test.mjs config.test.mjs easycon.test.mjs input-reliability.test.mjs keymap.test.mjs gamepad-map.test.mjs transport.test.mjs rumble.test.mjs haptics.test.mjs source-integration.test.mjs",
     "test:cloudflare": "node cloudflare-signaling.test.mjs"
   },
   "dependencies": {

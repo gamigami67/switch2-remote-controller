@@ -93,6 +93,9 @@ Open `http://127.0.0.1:8787`. The bridge accepts local WebSocket clients only,
 reconnects the configured serial port, preserves digital button edges, and
 sends neutral input when the controller page disconnects.
 
+For the browser, Pro Controller, and local automation input routes, see
+[v2 input routes](docs/v2-input.md).
+
 ## Pairing
 
 1. Flash either firmware profile and reconnect the ESP32-C3 with a USB data

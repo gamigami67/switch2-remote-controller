@@ -36,3 +36,12 @@ test("converts configurable gamepad buttons into controller state", () => {
   const state = gamepadState(pad, resolveGamepadActions(bindings, buttons));
   assert.deepEqual(state, { buttons: 1 << 2, hat: 0, lx: 128, ly: 128, rx: 128, ry: 128 });
 });
+
+test("Pro controller keeps the left stick separate from the D-pad", () => {
+  const buttons = Array.from({ length: 17 }, () => ({ pressed: false }));
+  const pad = { buttons, axes: [1, -1, 0, 0] };
+  const actions = resolveGamepadActions(defaultGamepadBindings(), buttons);
+  assert.equal(gamepadState(pad, actions, { dpadFromLeftStick: false }).hat, 8);
+  assert.equal(gamepadState(pad, actions, { dpadFromLeftStick: false }).lx, 255);
+  assert.equal(gamepadState(pad, actions, { dpadFromLeftStick: false }).ly, 0);
+});
