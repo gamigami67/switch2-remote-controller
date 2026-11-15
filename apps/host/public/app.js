@@ -79,7 +79,7 @@ function connect(takeover = false) {
           sourceSelect.value = inputSource; previousGamepad = "";
         }
         sourceStatus.textContent = message.ready
-          ? `入力元: ${{ browser: "ブラウザー操作", pro: "Proコントローラー", automation: "自動操作" }[message.source] || message.source}`
+          ? `入力元: ${{ browser: "ブラウザー操作", pro: "Proコントローラー", automation: "自動操作", "python-pro": "Proコントローラー（Python）" }[message.source] || message.source}`
           : "ESP32接続待ち / ニュートラル送信中";
       }
       if (message.type === "rumble") routeRumble(message);
@@ -249,7 +249,7 @@ function send() {
       pendingRelayState = envelope;
       flushRelay();
     }
-  } else if (socket?.readyState === WebSocket.OPEN && inputSource !== "automation") socket.send(JSON.stringify({ type: "input", source: inputSource, ...envelope }));
+  } else if (socket?.readyState === WebSocket.OPEN && !["automation", "python-pro"].includes(inputSource)) socket.send(JSON.stringify({ type: "input", source: inputSource, ...envelope }));
 }
 function forwardInput(message) {
   const envelope = {

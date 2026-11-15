@@ -20,9 +20,9 @@ watchdog remains a second layer of protection.
 
 ## Local automation interface
 
-The host already has one serial owner. A future DQM3 process connects to
+The host already has one serial owner. AutoBattle v4 connects to
 `ws://127.0.0.1:8787/automation`; it never opens COM3. The controller page
-must select **自動操作（ローカル）** first. Only one automation WebSocket is
+can also select **自動操作（ローカル）**. Only one automation WebSocket is
 accepted. The HTTP server and both WebSocket routes bind to loopback and
 reject non-loopback peers. There is no authentication beyond local-machine
 access; any local process able to connect can supply input while this source
@@ -39,13 +39,17 @@ Minus, Plus, left stick click, right stick click, Home, Capture. `hat` is
 0–7 clockwise from Up; 8 is released. Stick bytes are 0–255, with 128 at
 center; X increases rightward and Y downward. Invalid or missing values
 are sanitized to neutral or clamped by the host. The socket receives
-`automation-status` messages containing `enabled`, `source`,
-`serialConnected`, `bleConnected`, and `error`. It can optionally use the
+`automation-status` messages containing `enabled`, `source`, `ready`,
+`serialConnected`, `bleConnected`, and `error`. `ready` becomes true after
+the neutral frame has cleared the previous source. It can optionally use the
 existing `sid`/`edges` digital-edge envelope used by the browser; see
 `apps/host/public/input-reliability.js`.
 
-On source switch, automation input timeout, socket close, or serial failure,
-the host sends neutral. Source switching is controlled by the page via
-`/control`, not by the automation client. This release provides the local
-endpoint and state contract; it does not implement a DQM3 client or modify
-the DQM3 project.
+The Python client selects a source with
+`{"type":"source","source":"automation"}` or
+`{"type":"source","source":"python-pro"}`. It releases control with
+`{"type":"source","source":"browser"}`. While Python owns either
+source, browser source commands cannot replace it. On source switch, input
+timeout, socket close, or serial failure, the host sends neutral. The same
+`/automation` input frame format is used for both Python sources; the host
+remains the only serial owner.

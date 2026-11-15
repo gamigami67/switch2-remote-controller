@@ -47,6 +47,18 @@ test("local source selection controls the automation route without a serial devi
     assert.equal((await status()).sourceReady, false);
     control.send(JSON.stringify({ type: "source", source: "browser" }));
     await waitFor(async () => (await status()).inputSource === "browser");
+    automation.send(JSON.stringify({ type: "source", source: "python-pro" }));
+    await waitFor(async () => (await status()).inputSource === "python-pro");
+    control.send(JSON.stringify({ type: "source", source: "browser" }));
+    await pause(50);
+    assert.equal((await status()).inputSource, "python-pro");
+    control.terminate();
+    await waitFor(async () => !(await status()).localControllerConnected);
+    assert.equal((await status()).inputSource, "python-pro");
+    automation.send(JSON.stringify({ type: "source", source: "automation" }));
+    await waitFor(async () => (await status()).inputSource === "automation");
+    automation.terminate();
+    await waitFor(async () => (await status()).inputSource === "browser");
   } finally {
     control?.terminate();
     automation?.terminate();

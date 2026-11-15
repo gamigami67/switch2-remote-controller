@@ -65,6 +65,7 @@ let currentRumble = { type: "rumble", seq: 0, strong: 0, weak: 0, duration: 0 };
 let localControllerSocket = null;
 let automationSocket = null;
 let automationEnabled = false;
+let pythonOwnsSource = false;
 let automationLastInputAt = 0;
 let inputSource = "browser";
 let sourceReady = false;
@@ -93,6 +94,7 @@ function sendAutomationStatus(error = null) {
     bleConnected: esp32BleConnected,
     enabled: automationEnabled,
     source: inputSource,
+    ready: sourceReady,
     error,
   }));
 }
@@ -104,9 +106,9 @@ function sendSourceStatus() {
 }
 
 function switchInputSource(source, force = false) {
-  if (!["browser", "pro", "automation"].includes(source) || (source === inputSource && !force)) return;
+  if (!["browser", "pro", "automation", "python-pro"].includes(source) || (source === inputSource && !force)) return;
   inputSource = source;
-  automationEnabled = source === "automation";
+  automationEnabled = source === "automation" || source === "python-pro";
   automationLastInputAt = Date.now();
   sourceReady = false;
   forceNeutral();
@@ -131,7 +133,7 @@ function forceNeutral() {
 
 function disableAutomation(error = null) {
   if (!automationEnabled) return;
-  switchInputSource("automation", true);
+  switchInputSource(inputSource, true);
   automationLastInputAt = 0;
   sendAutomationStatus(error);
 }
@@ -323,7 +325,14 @@ function openEsp32Serial() {
       }
       const notify = line.match(/^DB:(\d+):(\d+)$/);
       if (notify) {
-        esp32BleNotifications = Number(notify[1]);
+        const notifications = Number(notify[1]);
+        // The ESP32 may connect to the Switch before this serial port opens.
+        // Advancing HID notifications confirm an active BLE link in that case.
+        if (esp32BleNotifications !== null && notifications > esp32BleNotifications && !esp32BleConnected) {
+          esp32BleConnected = true;
+          sendAutomationStatus();
+        }
+        esp32BleNotifications = notifications;
         esp32BleInputTransitions = Number(notify[2]);
       }
       const reliability = line.match(/^DR:(\d+):(\d+):(\d+):(\d+):(\d+)$/);
@@ -481,6 +490,10 @@ websocket.on("connection", (socket, request) => {
     try {
       const message = JSON.parse(raw.toString());
       if (message.type === "source" && typeof message.source === "string") {
+        if (pythonOwnsSource || message.source === "python-pro") {
+          sendSourceStatus();
+          return;
+        }
         switchInputSource(message.source);
         return;
       }
@@ -522,7 +535,7 @@ websocket.on("connection", (socket, request) => {
     if (socket !== localControllerSocket) return;
     localControllerSocket = null;
     lastBrowserInput = 0;
-    switchInputSource("browser", true);
+    if (!pythonOwnsSource) switchInputSource("browser", true);
   });
 });
 
@@ -565,6 +578,13 @@ automationWebsocket.on("connection", (socket, request) => {
       socket.close(1003, "invalid message");
       return;
     }
+    if (message.type === "source") {
+      if (!["browser", "automation", "python-pro"].includes(message.source)) return;
+      pythonOwnsSource = message.source !== "browser";
+      switchInputSource(message.source);
+      sendSourceStatus();
+      return;
+    }
     if (message.type !== "input" || !automationEnabled || !sourceReady) return;
     const nextState = sanitizeState(message.state);
     const digital = acceptDigitalEdges(message);
@@ -579,13 +599,16 @@ automationWebsocket.on("connection", (socket, request) => {
   });
   socket.on("close", () => {
     if (socket !== automationSocket) return;
-    disableAutomation();
+    if (pythonOwnsSource) {
+      pythonOwnsSource = false;
+      switchInputSource("browser", true);
+    } else disableAutomation();
     automationSocket = null;
   });
 });
 
 setInterval(() => {
-  if (inputSource !== "automation" && lastBrowserInput && Date.now() - lastBrowserInput > 1200) {
+  if (inputSource !== "automation" && inputSource !== "python-pro" && lastBrowserInput && Date.now() - lastBrowserInput > 1200) {
     lastBrowserInput = 0;
     switchInputSource(inputSource, true);
   }
